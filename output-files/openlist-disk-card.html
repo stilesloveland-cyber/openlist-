@@ -174,7 +174,6 @@
     #olcc .olcc-skel .olcc-l1 { width: 58%; height: 11px; margin-bottom: 8px; }
     #olcc .olcc-skel .olcc-l2 { width: 40%; height: 9px; }
   `;
-  document.head.appendChild(style);
 
   /* ---------- 骨架 ---------- */
   const card = document.createElement('section');
@@ -219,7 +218,6 @@
       </div>
     </div>
   `;
-  document.body.appendChild(card);
 
   const metaEl = card.querySelector('.olcc-meta-t');
   const listEl = card.querySelector('.olcc-list');
@@ -481,11 +479,17 @@
     });
   };
 
-  // 修复: 脚本在 DOMContentLoaded 之后注入时也能正常启动
-  if (document.readyState === 'loading') {
-    document.addEventListener('DOMContentLoaded', init);
-  } else {
+  /* ---------- 挂载（等待 <body> 可用再插入，独立打开文件时 body 可能尚未解析） ---------- */
+  const start = () => {
+    if (!document.body) { setTimeout(start, 10); return; }
+    document.head.appendChild(style);
+    document.body.appendChild(card);
     init();
+  };
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', start);
+  } else {
+    start();
   }
 })();
 </script>
