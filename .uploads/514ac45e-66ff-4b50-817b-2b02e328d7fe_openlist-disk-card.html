@@ -1,242 +1,491 @@
 <script>
-document.addEventListener('DOMContentLoaded', () => {
+/* OpenList 磁盘状态卡片 — 圆环仪表盘版
+ * 数据来源: /NAS/.disk.json（由 gen_disk_status.sh 定时生成）
+ * 功能: 圆环用量展示 / 拖拽 / 折叠 / 明暗主题自适应 / 60s 自动刷新
+ */
+(() => {
+  if (window.__olcc) return;          // 防止重复注入
+  window.__olcc = true;
+
   const KEY_POS = 'olcc-pos';
   const KEY_FOLD = 'olcc-fold';
+  const DATA_PATH = '/NAS/.disk.json';
+  const REFRESH_MS = 60000;
+  const R = 21;                       // 圆环半径（SVG 坐标）
+  const CIRC = 2 * Math.PI * R;       // 圆环周长
+  const MONO = 'ui-monospace,"SF Mono","Cascadia Code","Roboto Mono",Menlo,Consolas,monospace';
 
+  /* ---------- 样式 ---------- */
   const style = document.createElement('style');
   style.textContent = `
     #olcc {
-      position: fixed;
-      z-index: 99999;
-      left: 18px;
-      top: 18px;
-      width: 260px;
-      overflow: hidden;
-      color: #263238;
-      font: 13px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI","Microsoft YaHei",sans-serif;
-      background: rgba(255,255,255,.68);
+      --bg: rgba(255,255,255,.72);
+      --fg: #20303a; --mut: #687982;
+      --track: rgba(16,42,60,.10); --hair: rgba(16,42,60,.07);
+      --sheen: rgba(255,255,255,.7);
+      --shadow: 0 16px 40px rgba(21,45,66,.20), 0 3px 10px rgba(21,45,66,.10);
+      position: fixed; z-index: 99999;
+      left: 18px; top: 18px; width: 296px;
+      color: var(--fg);
+      font: 13px/1.5 -apple-system, BlinkMacSystemFont, "SF Pro Text", "Segoe UI",
+            "PingFang SC", "Hiragino Sans GB", "Microsoft YaHei", sans-serif;
+      background: var(--bg);
       border: 1px solid rgba(255,255,255,.8);
-      border-radius: 12px;
-      box-shadow: 0 8px 28px rgba(40,60,80,.16);
-      backdrop-filter: blur(16px) saturate(140%);
-      -webkit-backdrop-filter: blur(16px) saturate(140%);
-      user-select: none;
+      border-radius: 18px;
+      box-shadow: var(--shadow), inset 0 1px 0 var(--sheen);
+      backdrop-filter: blur(24px) saturate(165%);
+      -webkit-backdrop-filter: blur(24px) saturate(165%);
+      user-select: none; -webkit-user-select: none;
+      overflow: hidden;
+      animation: olcc-pop .5s cubic-bezier(.2,1,.4,1) both;
     }
-    #olcc.olcc-folded .olcc-body { display: none; }
-    #olcc .olcc-title {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      height: 34px;
-      padding: 0 11px;
-      cursor: move;
-      font-weight: 600;
-      border-bottom: 1px solid rgba(120,140,160,.16);
+    #olcc.olcc-dark {
+      --bg: rgba(18,24,31,.72);
+      --fg: #e9eff4; --mut: #a3b3bc;
+      --track: rgba(226,240,250,.13); --hair: rgba(226,240,250,.08);
+      --sheen: rgba(255,255,255,.06);
+      --shadow: 0 16px 40px rgba(0,0,0,.5), 0 3px 10px rgba(0,0,0,.35);
+      border-color: rgba(255,255,255,.1);
     }
-    #olcc .olcc-arrow {
-      opacity: .6;
-      transition: transform .2s;
+    @keyframes olcc-pop { from { opacity: 0; transform: translateY(12px) scale(.95); } }
+    @keyframes olcc-in   { from { opacity: 0; transform: translateY(8px); } }
+    @keyframes olcc-pulse {
+      0%   { box-shadow: 0 0 0 0 rgba(46,204,113,.45); }
+      75%  { box-shadow: 0 0 0 6px rgba(46,204,113,0); }
+      100% { box-shadow: 0 0 0 0 rgba(46,204,113,0); }
     }
-    #olcc.olcc-folded .olcc-arrow { transform: rotate(-90deg); }
-    #olcc .olcc-body { padding: 8px 11px 10px; }
+    @keyframes olcc-shimmer { from { background-position: 120% 0; } to { background-position: -120% 0; } }
+
+    /* ---- 头部（拖拽手柄 + 折叠） ---- */
+    #olcc .olcc-head {
+      display: flex; align-items: center; gap: 8px;
+      height: 44px; padding: 0 10px 0 15px;
+      cursor: grab; touch-action: none;      /* 修复: 触屏拖拽被页面滚动打断 */
+    }
+    #olcc .olcc-head:active { cursor: grabbing; }
+    #olcc .olcc-grip {
+      display: flex; flex-direction: column; gap: 3px;
+      margin-right: -2px; opacity: 0; transition: opacity .25s;
+    }
+    #olcc .olcc-head:hover .olcc-grip { opacity: .45; }
+    #olcc .olcc-grip i { width: 3px; height: 3px; border-radius: 50%; background: currentColor; }
+    #olcc .olcc-logo { flex: none; opacity: .85; }
+    #olcc .olcc-title { font-weight: 650; font-size: 13px; letter-spacing: .02em; }
+    #olcc .olcc-live {
+      display: inline-flex; align-items: center; gap: 5px;
+      padding: 2.5px 8px; border-radius: 99px;
+      font-size: 9.5px; font-weight: 600; letter-spacing: .12em;
+      color: #1d9e62; background: rgba(46,204,113,.13);
+    }
+    #olcc.olcc-dark .olcc-live { color: #43d17e; background: rgba(46,204,113,.14); }
+    #olcc .olcc-live i {
+      width: 5px; height: 5px; border-radius: 50%;
+      background: currentColor; animation: olcc-pulse 2.4s ease-out infinite;
+    }
+    #olcc .olcc-toggle {
+      margin-left: auto; display: flex; align-items: center; justify-content: center;
+      width: 26px; height: 26px; padding: 0; border: 0; border-radius: 8px;
+      background: transparent; color: var(--mut); cursor: pointer;
+      transition: background .2s, color .2s, transform .32s cubic-bezier(.4,0,.2,1);
+    }
+    #olcc .olcc-toggle:hover { background: var(--track); color: var(--fg); }
+    #olcc.olcc-folded .olcc-toggle { transform: rotate(-90deg); }
+
+    /* ---- 折叠动画（grid 1fr -> 0fr） ---- */
+    #olcc .olcc-fold {
+      display: grid; grid-template-rows: 1fr;
+      transition: grid-template-rows .34s cubic-bezier(.4,0,.2,1);
+    }
+    #olcc.olcc-folded .olcc-fold { grid-template-rows: 0fr; }
+    #olcc .olcc-body { min-height: 0; overflow: hidden; padding: 1px 15px 13px; }
+
     #olcc .olcc-meta {
-      margin-bottom: 7px;
-      color: #71808b;
-      font-size: 11px;
+      display: flex; align-items: center; gap: 6px;
+      margin: 1px 2px 7px; color: var(--mut);
+      font-size: 11px; letter-spacing: .01em;
     }
-    #olcc .olcc-row { margin: 7px 0; }
-    #olcc .olcc-line {
-      display: flex;
-      justify-content: space-between;
-      gap: 8px;
-      margin-bottom: 4px;
+    #olcc .olcc-meta svg { flex: none; opacity: .75; }
+
+    /* ---- 磁盘列表 ---- */
+    #olcc .olcc-list {
+      display: flex; flex-direction: column; gap: 1px;
+      margin: 0; padding: 0; list-style: none;
     }
+    #olcc .olcc-row {
+      display: flex; align-items: center; gap: 13px;
+      padding: 8px 8px; margin: 0 -8px; border-radius: 13px;
+      animation: olcc-in .55s cubic-bezier(.2,1,.4,1) both;
+      transition: background .2s;
+    }
+    #olcc .olcc-row:hover { background: var(--track); }
+
+    /* ---- 圆环仪表 ---- */
+    #olcc .olcc-ring { position: relative; flex: none; width: 56px; height: 56px; }
+    #olcc .olcc-ring svg { width: 100%; height: 100%; overflow: visible; transform: rotate(-90deg); }
+    #olcc .olcc-track { fill: none; stroke: var(--track); stroke-width: 5; }
+    #olcc .olcc-val {
+      fill: none; stroke-width: 5; stroke-linecap: round;
+      transition: stroke-dashoffset .9s cubic-bezier(.25,.8,.3,1);
+      filter: drop-shadow(0 0 5px var(--c-glow, transparent));
+    }
+    #olcc .olcc-ring stop:first-child { stop-color: var(--c-a, #7bd88f); }
+    #olcc .olcc-ring stop:last-child  { stop-color: var(--c-b, #2f9e63); }
+    #olcc .olcc-ring.olcc-unknown .olcc-track {   /* 未上报容量的磁盘: 虚线轨道 */
+      stroke-dasharray: 2 5;
+      stroke-linecap: round;
+    }
+    #olcc .olcc-pct {
+      position: absolute; inset: 0;
+      display: flex; align-items: center; justify-content: center;
+      font: 600 13px/1 ${MONO};
+      font-variant-numeric: tabular-nums; letter-spacing: -.03em;
+    }
+    #olcc .olcc-pct small { font-size: 8.5px; font-weight: 700; opacity: .5; margin-left: 1px; }
+
+    /* ---- 文本信息 ---- */
+    #olcc .olcc-info { flex: 1; min-width: 0; }
     #olcc .olcc-name {
-      overflow: hidden;
-      text-overflow: ellipsis;
-      white-space: nowrap;
-      font-weight: 500;
+      display: block; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+      font-weight: 600; font-size: 12.5px;
     }
-    #olcc .olcc-size {
-      flex: 0 0 auto;
-      color: #687780;
-      font-size: 11px;
+    #olcc .olcc-nums {
+      display: flex; align-items: baseline; gap: 5px; margin-top: 3px;
+      font: 500 11px/1.3 ${MONO};
+      font-variant-numeric: tabular-nums;
     }
-    #olcc .olcc-track {
-      height: 6px;
-      overflow: hidden;
-      background: rgba(120,140,160,.18);
-      border-radius: 99px;
+    #olcc .olcc-used { font-weight: 650; color: var(--fg); }
+    #olcc .olcc-total, #olcc .olcc-sep { color: var(--mut); }
+    #olcc .olcc-free { display: block; margin-top: 2px; color: var(--mut); font-size: 11px; }
+
+    /* ---- 提示 / 骨架屏 ---- */
+    #olcc .olcc-msg {
+      display: flex; align-items: center; gap: 8px;
+      padding: 12px 4px 4px; color: var(--mut); font-size: 12px;
     }
-    #olcc .olcc-bar {
-      height: 100%;
-      min-width: 2px;
-      border-radius: inherit;
-      background: linear-gradient(90deg,#42b883,#3b9ddd);
+    #olcc .olcc-msg svg { flex: none; opacity: .7; }
+    #olcc .olcc-skel { pointer-events: none; }
+    #olcc .olcc-skel i {
+      display: block; border-radius: 99px;
+      background: linear-gradient(100deg, var(--track) 30%, var(--hair) 50%, var(--track) 70%);
+      background-size: 220% 100%;
+      animation: olcc-shimmer 1.3s linear infinite;
     }
-    #olcc .olcc-bar.warn {
-      background: linear-gradient(90deg,#f6b73c,#ed6a45);
-    }
-    #olcc .olcc-error {
-      padding: 5px 0;
-      color: #c65b4b;
-      font-size: 12px;
-    }
-    @media (prefers-color-scheme: dark) {
-      #olcc {
-        color: #e8edf0;
-        background: rgba(28,34,40,.72);
-        border-color: rgba(255,255,255,.12);
-        box-shadow: 0 8px 28px rgba(0,0,0,.3);
-      }
-      #olcc .olcc-meta,
-      #olcc .olcc-size { color: #9daab2; }
-      #olcc .olcc-track { background: rgba(220,230,240,.18); }
-    }
+    #olcc .olcc-skel .olcc-c { width: 56px; height: 56px; border-radius: 50%; }
+    #olcc .olcc-skel .olcc-l1 { width: 58%; height: 11px; margin-bottom: 8px; }
+    #olcc .olcc-skel .olcc-l2 { width: 40%; height: 9px; }
   `;
   document.head.appendChild(style);
 
+  /* ---------- 骨架 ---------- */
   const card = document.createElement('section');
   card.id = 'olcc';
   card.innerHTML = `
-    <div class="olcc-title">
-      <span>磁盘状态</span><span class="olcc-arrow">⌄</span>
-    </div>
-    <div class="olcc-body">
-      <div class="olcc-meta">正在加载...</div>
-      <div class="olcc-list"></div>
+    <header class="olcc-head">
+      <span class="olcc-grip"><i></i><i></i><i></i></span>
+      <svg class="olcc-logo" viewBox="0 0 24 24" width="15" height="15" fill="none"
+           stroke="currentColor" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round">
+        <ellipse cx="12" cy="5.5" rx="8" ry="3"/>
+        <path d="M4 5.5v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>
+        <path d="M4 11.5v6c0 1.66 3.58 3 8 3s8-1.34 8-3v-6"/>
+      </svg>
+      <span class="olcc-title">磁盘状态</span>
+      <span class="olcc-live"><i></i>实时</span>
+      <button class="olcc-toggle" type="button" aria-label="展开/折叠">
+        <svg viewBox="0 0 24 24" width="14" height="14" fill="none"
+             stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round">
+          <path d="m6 9 6 6 6-6"/>
+        </svg>
+      </button>
+    </header>
+    <div class="olcc-fold">
+      <div class="olcc-body">
+        <div class="olcc-meta">
+          <svg viewBox="0 0 24 24" width="11" height="11" fill="none"
+               stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+            <circle cx="12" cy="12" r="9"/><path d="M12 7v5l3 2"/>
+          </svg>
+          <span class="olcc-meta-t">正在加载…</span>
+        </div>
+        <ul class="olcc-list">
+          <li class="olcc-row olcc-skel">
+            <div class="olcc-ring"><i class="olcc-c"></i></div>
+            <div class="olcc-info"><i class="olcc-l1"></i><i class="olcc-l2"></i></div>
+          </li>
+          <li class="olcc-row olcc-skel">
+            <div class="olcc-ring"><i class="olcc-c"></i></div>
+            <div class="olcc-info"><i class="olcc-l1"></i><i class="olcc-l2"></i></div>
+          </li>
+        </ul>
+      </div>
     </div>
   `;
   document.body.appendChild(card);
 
-  try {
-    const pos = JSON.parse(localStorage.getItem(KEY_POS) || 'null');
-    if (pos && Number.isFinite(pos.left) && Number.isFinite(pos.top)) {
-      card.style.left = `${pos.left}px`;
-      card.style.top = `${pos.top}px`;
-    }
-  } catch (_) {}
+  const metaEl = card.querySelector('.olcc-meta-t');
+  const listEl = card.querySelector('.olcc-list');
 
-  if (localStorage.getItem(KEY_FOLD) === '1') card.classList.add('olcc-folded');
-
-  const title = card.querySelector('.olcc-title');
-  let drag = null;
-  let moved = false;
-
-  title.addEventListener('pointerdown', e => {
-    moved = false;
-    const rect = card.getBoundingClientRect();
-    drag = {
-      id: e.pointerId,
-      x: e.clientX,
-      y: e.clientY,
-      left: rect.left,
-      top: rect.top
-    };
-    title.setPointerCapture(e.pointerId);
-  });
-
-  title.addEventListener('pointermove', e => {
-    if (!drag || drag.id !== e.pointerId) return;
-    const dx = e.clientX - drag.x;
-    const dy = e.clientY - drag.y;
-    if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
-    const nl = Math.max(0, Math.min(drag.left + dx, window.innerWidth - 270));
-    const nt = Math.max(0, Math.min(drag.top + dy, window.innerHeight - 46));
-    card.style.left = `${nl}px`;
-    card.style.top = `${nt}px`;
-  });
-
-  title.addEventListener('pointerup', e => {
-    if (!drag || drag.id !== e.pointerId) return;
-    if (moved) {
-      const rect = card.getBoundingClientRect();
-      localStorage.setItem(KEY_POS, JSON.stringify({
-        left: Math.round(rect.left),
-        top: Math.round(rect.top)
-      }));
-    }
-    drag = null;
-  });
-
-  title.addEventListener('click', () => {
-    if (moved) return;
-    const folded = card.classList.toggle('olcc-folded');
-    localStorage.setItem(KEY_FOLD, folded ? '1' : '0');
-  });
+  /* ---------- 工具 ---------- */
+  const esc = s => String(s).replace(/[&<>"']/g,
+    c => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[c]));
 
   const formatSize = bytes => {
     bytes = Number(bytes) || 0;
     const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
     let i = 0;
-    while (bytes >= 1024 && i < units.length - 1) {
-      bytes /= 1024;
-      i++;
-    }
+    while (bytes >= 1024 && i < units.length - 1) { bytes /= 1024; i++; }
     return `${bytes.toFixed(i ? 1 : 0)} ${units[i]}`;
   };
 
-  const render = data => {
-    const meta = card.querySelector('.olcc-meta');
-    const list = card.querySelector('.olcc-list');
-    const storages = Array.isArray(data?.storages) ? data.storages : [];
-
-    meta.textContent = data?.updated
-      ? `更新于 ${new Date(Number(data.updated) * 1000).toLocaleString()}`
-      : '更新时间未知';
-
-    list.innerHTML = storages.length ? storages.map(d => {
-      const total = Number(d.total) || 0;
-      const used = Number(d.used) || 0;
-      const percent = total ? Math.min(100, used / total * 100) : 0;
-      return `
-        <div class="olcc-row">
-          <div class="olcc-line">
-            <span class="olcc-name">${String(d.name ?? '未命名磁盘')}</span>
-            <span class="olcc-size">${formatSize(used)} / ${formatSize(total)}</span>
-          </div>
-          <div class="olcc-track">
-            <div class="olcc-bar${percent >= 80 ? ' warn' : ''}"
-                 style="width:${percent.toFixed(2)}%"></div>
-          </div>
-        </div>
-      `;
-    }).join('') : '<div class="olcc-error">暂无磁盘数据</div>';
+  const fmtTime = ts => {
+    const n = Number(ts);
+    if (!Number.isFinite(n) || n <= 0) return '更新时间未知';
+    const d = new Date(n > 1e12 ? n : n * 1000);   // 兼容秒 / 毫秒时间戳
+    return `更新于 ${d.toLocaleString([], {
+      month: '2-digit', day: '2-digit',
+      hour: '2-digit', minute: '2-digit', second: '2-digit', hour12: false
+    })}`;
   };
 
+  const calc = d => {
+    const total = Math.max(0, Number(d?.total) || 0);
+    const used = Math.max(0, Number(d?.used) || 0);
+    const free = Math.max(0, Number(d?.free) || Math.max(0, total - used));
+    const pct = total > 0 ? Math.min(100, used / total * 100) : 0;
+    return { total, used, free, pct };
+  };
+
+  /* 用量 -> 颜色: 青绿(156°) 非线性过渡到 红(0°)，中高用量更早转为琥珀/红色便于区分 */
+  const ringColor = pct => {
+    const t = Math.min(100, pct) / 100;
+    const hue = Math.round(156 * (1 - Math.pow(t, .7)));
+    return {
+      a: `hsl(${hue} 80% 62%)`,
+      b: `hsl(${hue} 70% 48%)`,
+      glow: `hsl(${hue} 80% 58% / .32)`
+    };
+  };
+
+  /* ---------- 渲染 ---------- */
+  const ringSVG = i => `
+    <svg viewBox="0 0 56 56" aria-hidden="true">
+      <defs>
+        <linearGradient id="olcc-g${i}" x1="0" y1="0" x2="1" y2="1">
+          <stop offset="0"/><stop offset="1"/>
+        </linearGradient>
+      </defs>
+      <circle class="olcc-track" cx="28" cy="28" r="${R}"/>
+      <circle class="olcc-val" cx="28" cy="28" r="${R}" stroke="url(#olcc-g${i})"/>
+    </svg>`;
+
+  const rowHTML = (d, i, animate) => {
+    const name = esc(String(d?.name ?? '').replace(/^\//, '') || '未命名磁盘');
+    return `
+    <li class="olcc-row" style="${animate ? `animation-delay:${i * 70}ms` : 'animation:none'}">
+      <div class="olcc-ring">
+        ${ringSVG(i)}
+        <span class="olcc-pct"><span class="olcc-pct-n"></span><small>%</small></span>
+      </div>
+      <div class="olcc-info">
+        <span class="olcc-name" title="${name}">${name}</span>
+        <span class="olcc-nums">
+          <b class="olcc-used"></b><span class="olcc-sep">/</span><span class="olcc-total"></span>
+        </span>
+        <span class="olcc-free"></span>
+      </div>
+    </li>`;
+  };
+
+  const setRow = (li, d, sweep) => {
+    const { total, used, free, pct } = calc(d);
+    const col = ringColor(pct);
+    const ring = li.querySelector('.olcc-ring');
+    ring.classList.toggle('olcc-unknown', total === 0);   // 未上报容量: 虚线轨道
+    ring.style.setProperty('--c-a', col.a);
+    ring.style.setProperty('--c-b', col.b);
+    ring.style.setProperty('--c-glow', col.glow);
+
+    const val = li.querySelector('.olcc-val');
+    val.style.strokeDasharray = CIRC.toFixed(2);
+    const target = (CIRC * (1 - pct / 100)).toFixed(2);
+    if (sweep) {
+      val.style.strokeDashoffset = CIRC.toFixed(2);      // 从空环起扫
+      requestAnimationFrame(() => requestAnimationFrame(() => {
+        val.style.strokeDashoffset = target;             // 双 rAF 确保过渡生效
+      }));
+    } else {
+      val.style.strokeDashoffset = target;
+    }
+
+    li.querySelector('.olcc-pct-n').textContent = total > 0 ? Math.round(pct) : '–';
+    li.querySelector('.olcc-used').textContent = formatSize(used);
+    li.querySelector('.olcc-total').textContent = formatSize(total);
+    li.querySelector('.olcc-free').textContent = `可用 ${formatSize(free)}`;
+  };
+
+  const ICON = {
+    login: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="4" y="11" width="16" height="9" rx="2"/><path d="M8 11V7a4 4 0 0 1 8 0v4"/></svg>',
+    fail: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M10.3 3.9 2.2 17.6a2 2 0 0 0 1.7 2.9h16.2a2 2 0 0 0 1.7-2.9L13.7 3.9a2 2 0 0 0-3.4 0Z"/><path d="M12 9v4"/><path d="M12 17h.01"/></svg>',
+    empty: '<svg viewBox="0 0 24 24" width="13" height="13" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><circle cx="12" cy="12" r="9"/><path d="M12 8h.01"/><path d="M11 12h1v4h1"/></svg>'
+  };
+
+  let hasRows = false;
+  const render = (data, animate) => {
+    metaEl.textContent = fmtTime(data?.updated);
+    const storages = Array.isArray(data?.storages) ? data.storages : [];
+    if (!storages.length) {
+      listEl.innerHTML = `<li class="olcc-msg">${ICON.empty}暂无磁盘数据</li>`;
+      hasRows = false;
+      return;
+    }
+    const sig = storages.map(s => String(s?.name ?? '')).join('\u0001');
+    if (listEl.dataset.sig !== sig || !hasRows) {
+      listEl.innerHTML = storages.map((d, i) => rowHTML(d, i, animate)).join('');
+      listEl.dataset.sig = sig;
+      hasRows = true;
+    }
+    storages.forEach((d, i) => setRow(listEl.children[i], d, animate));
+  };
+
+  /* ---------- 数据加载 ---------- */
+  let loadedOnce = false;
   const load = async () => {
-    if (!localStorage.getItem('token')) {
-      card.querySelector('.olcc-meta').textContent = '';
-      card.querySelector('.olcc-list').innerHTML = '<div class="olcc-error">登录后显示</div>';
+    const token = localStorage.getItem('token');
+    if (!token) {
+      metaEl.textContent = '';
+      listEl.innerHTML = `<li class="olcc-msg">${ICON.login}登录后显示</li>`;
+      hasRows = false;
       return;
     }
     try {
-      const response = await fetch('/api/fs/get', {
+      const res = await fetch('/api/fs/get', {
         method: 'POST',
-        headers: {
-          'Authorization': localStorage.getItem('token') || '',
-          'Content-Type': 'application/json'
-        },
-        body: JSON.stringify({ path: '/NAS/.disk.json' }),
+        headers: { 'Authorization': token, 'Content-Type': 'application/json' },
+        body: JSON.stringify({ path: DATA_PATH }),
         cache: 'no-store'
       });
-      const json = await response.json();
-      const rawUrl = json?.data?.raw_url;
-      if (!rawUrl) throw new Error('raw_url not found');
-
-      const url = new URL(rawUrl, location.href);
+      const json = await res.json();
+      if (json?.code !== 200 || !json?.data?.raw_url) {
+        throw new Error(String(json?.message || 'api error'));
+      }
+      const url = new URL(json.data.raw_url, location.href);
+      url.protocol = location.protocol;   // 修复: https 站点加载 http 直链被浏览器拦截
       url.host = location.host;
-
       const raw = await fetch(url.href, { cache: 'no-store' });
-      render(await raw.json());
-    } catch (e) {
-      card.querySelector('.olcc-meta').textContent = '读取失败';
-      card.querySelector('.olcc-list').innerHTML =
-        '<div class="olcc-error">无法获取磁盘状态</div>';
+      if (!raw.ok) throw new Error(`HTTP ${raw.status}`);
+      render(await raw.json(), !loadedOnce);
+      loadedOnce = true;
+    } catch (_) {
+      metaEl.textContent = '读取失败';
+      listEl.innerHTML = `<li class="olcc-msg">${ICON.fail}无法获取磁盘状态</li>`;
+      hasRows = false;
     }
   };
 
-  load();
-  setInterval(load, 60000);
-});
+  /* ---------- 位置 / 拖拽 / 折叠 ---------- */
+  const clampPos = () => {
+    const r = card.getBoundingClientRect();
+    if (!r.width && !r.height) return;
+    card.style.left = `${Math.max(8, Math.min(r.left, window.innerWidth - r.width - 8))}px`;
+    card.style.top = `${Math.max(8, Math.min(r.top, window.innerHeight - r.height - 8))}px`;
+  };
+
+  const toggleFold = () => {
+    const folded = card.classList.toggle('olcc-folded');
+    localStorage.setItem(KEY_FOLD, folded ? '1' : '0');
+    setTimeout(clampPos, 360);
+  };
+
+  const bindDrag = () => {
+    const head = card.querySelector('.olcc-head');
+    let drag = null;
+    let moved = false;
+
+    head.addEventListener('pointerdown', e => {
+      if (e.target.closest('.olcc-toggle')) return;
+      moved = false;
+      const rect = card.getBoundingClientRect();
+      drag = { id: e.pointerId, x: e.clientX, y: e.clientY, left: rect.left, top: rect.top };
+      try { head.setPointerCapture(e.pointerId); } catch (_) {}
+    });
+
+    head.addEventListener('pointermove', e => {
+      if (!drag || drag.id !== e.pointerId) return;
+      const dx = e.clientX - drag.x;
+      const dy = e.clientY - drag.y;
+      if (Math.abs(dx) + Math.abs(dy) > 4) moved = true;
+      if (!moved) return;
+      const w = card.offsetWidth || 1;    // 修复: 按实际尺寸夹取，不再硬编码宽高
+      const h = card.offsetHeight || 1;
+      card.style.left = `${Math.max(8, Math.min(drag.left + dx, window.innerWidth - w - 8))}px`;
+      card.style.top = `${Math.max(8, Math.min(drag.top + dy, window.innerHeight - h - 8))}px`;
+    });
+
+    const end = e => {
+      if (!drag || drag.id !== e.pointerId) return;
+      if (moved) {
+        const r = card.getBoundingClientRect();
+        localStorage.setItem(KEY_POS, JSON.stringify({
+          left: Math.round(r.left), top: Math.round(r.top)
+        }));
+      }
+      drag = null;
+    };
+    head.addEventListener('pointerup', end);
+    head.addEventListener('pointercancel', end);   // 修复: 系统打断指针时清理拖拽状态
+
+    head.addEventListener('click', e => {
+      if (moved || e.target.closest('.olcc-toggle')) return;
+      toggleFold();
+    });
+    card.querySelector('.olcc-toggle').addEventListener('click', e => {
+      e.stopPropagation();
+      toggleFold();
+    });
+  };
+
+  /* ---------- 明暗主题（跟随站点 dark class，缺省跟随系统） ---------- */
+  const mq = matchMedia('(prefers-color-scheme: dark)');
+  const applyTheme = () => {
+    const cls = document.documentElement.classList;
+    const dark = cls.contains('dark') ? true
+               : cls.contains('light') ? false
+               : mq.matches;
+    card.classList.toggle('olcc-dark', dark);
+  };
+
+  /* ---------- 启动 ---------- */
+  const init = () => {
+    try {
+      const pos = JSON.parse(localStorage.getItem(KEY_POS) || 'null');
+      if (pos && Number.isFinite(pos.left) && Number.isFinite(pos.top)) {
+        card.style.left = `${pos.left}px`;
+        card.style.top = `${pos.top}px`;
+      }
+    } catch (_) {}
+    if (localStorage.getItem(KEY_FOLD) === '1') card.classList.add('olcc-folded');
+
+    applyTheme();
+    new MutationObserver(applyTheme).observe(document.documentElement, {
+      attributes: true, attributeFilter: ['class']
+    });
+    mq.addEventListener?.('change', applyTheme);
+
+    bindDrag();
+    requestAnimationFrame(clampPos);        // 修复: 恢复位置后拉回可视区
+    window.addEventListener('resize', clampPos);
+
+    load();
+    setInterval(load, REFRESH_MS);
+    document.addEventListener('visibilitychange', () => {
+      if (!document.hidden) load();         // 回到页面立即刷新，避免陈旧数据
+    });
+  };
+
+  // 修复: 脚本在 DOMContentLoaded 之后注入时也能正常启动
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
+})();
 </script>
